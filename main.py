@@ -5,60 +5,49 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime
 import uvicorn
+import os
+from dotenv import load_dotenv
 
-# ============================================
-# CONFIGURATION
-# ============================================
+load_dotenv()
+
+API_KEY = os.getenv("API_KEY")
+if not API_KEY:
+    raise ValueError("API_KEY environment variable is required")
+
+from services.crypto_service import CryptoService
 
 app = FastAPI(
     title="Security API",
-    description="Demo API with API Key authentication (security anti-pattern)",
+    description="Demo API with API Key authentication and encryption",
     version="1.0.0"
 )
 
-# CORS configuration to allow requests from the frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, specify domains
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# API Key configuration
-API_KEY = "mi-api-key-secreta-123456"
-
-# ============================================
-# DATA MODELS
-# ============================================
+crypto_service = CryptoService()
 
 class DataRequest(BaseModel):
-    """Model for POST request input data"""
     nombre: Optional[str] = None
     mensaje: Optional[str] = None
     timestamp: Optional[str] = None
 
 class DataResponse(BaseModel):
-    """Model for GET response data"""
     message: str
     course: str
     status: str
     data: dict
 
 class HealthResponse(BaseModel):
-    """Model for health check response"""
     status: str
     timestamp: str
 
-# ============================================
-# AUTHENTICATION FUNCTIONS
-# ============================================
-
 def verify_api_key(x_api_key: Optional[str] = Header(None)):
-    """
-    Verifies that the API Key is valid.
-    This function is used as a dependency in protected endpoints.
-    """
     if x_api_key is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -73,42 +62,17 @@ def verify_api_key(x_api_key: Optional[str] = Header(None)):
     
     return x_api_key
 
-# ============================================
-# ENDPOINTS
-# ============================================
-
-@app.get(
-    "/health",
-    response_model=HealthResponse,
-    summary="Check server status",
-    description="Public endpoint that does not require authentication"
-)
+@app.get("/health", response_model=HealthResponse)
 async def health_check():
-    """
-    Server health endpoint.
-    No API Key required.
-    """
     return HealthResponse(
         status="ok",
         timestamp=datetime.now().isoformat()
     )
 
-
-@app.get(
-    "/api/data",
-    response_model=DataResponse,
-    summary="Get protected data",
-    description="Returns static data. Requires API Key authentication."
-)
+@app.get("/api/data", response_model=DataResponse)
 async def get_protected_data(api_key: Optional[str] = Header(None, alias="x-api-key")):
-    """
-    Gets protected data.
-    Requires 'x-api-key' header with the correct key.
-    """
-    # Verify API Key
     verify_api_key(api_key)
     
-    # Return protected data
     return DataResponse(
         message="Protected data",
         course="Security Exercise",
@@ -121,37 +85,61 @@ async def get_protected_data(api_key: Optional[str] = Header(None, alias="x-api-
         }
     )
 
-
-@app.post(
-    "/api/data",
-    summary="Send protected data",
-    description="Protected endpoint that accepts data. Requires API Key."
-)
+@app.post("/api/data")
 async def post_protected_data(
     request_data: Optional[DataRequest] = None,
     api_key: Optional[str] = Header(None, alias="x-api-key")
 ):
-    """
-    Receives data in the body.
-    Requires 'x-api-key' header with the correct key.
-    """
-    # Verify API Key
     verify_api_key(api_key)
     
-    # Return confirmation
     return {
         "message": "POST received",
         "receivedData": request_data.dict() if request_data else {},
         "timestamp": datetime.now().isoformat()
     }
 
-# ============================================
-# CUSTOM ERROR HANDLING
-# ============================================
+@app.post("/api/encrypt")
+async def encrypt_data(
+    request_data: DataRequest,
+    api_key: Optional[str] = Header(None, alias="x-api-key")
+):
+    verify_api_key(api_key)
+    
+    if not request_data.mensaje:
+        raise HTTPException(status_code=400, detail="The 'mensaje' field is required")
+    
+    try:
+        encrypted = crypto_service.encrypt(request_data.mensaje)
+        return {
+            "message": "Data encrypted successfully",
+            "encrypted_data": encrypted,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Encryption error: {str(e)}")
+
+@app.post("/api/decrypt")
+async def decrypt_data(
+    request_data: DataRequest,
+    api_key: Optional[str] = Header(None, alias="x-api-key")
+):
+    verify_api_key(api_key)
+    
+    if not request_data.mensaje:
+        raise HTTPException(status_code=400, detail="The 'mensaje' field is required")
+    
+    try:
+        decrypted = crypto_service.decrypt(request_data.mensaje)
+        return {
+            "message": "Data decrypted successfully",
+            "plaintext": decrypted,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Decryption error: {str(e)}")
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):
-    """Customizes error message for 401"""
     if exc.status_code == 401:
         return JSONResponse(
             status_code=401,
@@ -166,22 +154,21 @@ async def http_exception_handler(request, exc):
         content={"error": exc.detail}
     )
 
-# ============================================
-# SERVER STARTUP
-# ============================================
-
 if __name__ == "__main__":
     print("\n" + "="*60)
-    print("SERVER STARTED")
+    print("SECURITY API STARTED")
     print("="*60)
     print(f"API URL: http://localhost:8000")
-    print(f" Documentation: http://localhost:8000/docs")
-    print(f" API Key: {API_KEY}")
+    print(f"Documentation: http://localhost:8000/docs")
+    print(f"API Key: {API_KEY}")
+    print(f"Encryption Key: {os.getenv('DATABASE_ENCRYPTION_KEY', 'NOT SET')[:10]}...")
     print("="*60)
-    print("\n Available endpoints:")
-    print("   GET  /health     (Public) ")
-    print("   GET  /api/data   (Protected) ")
-    print("   POST /api/data   (Protected) ")
+    print("\nAvailable endpoints:")
+    print("   GET  /health          (Public)")
+    print("   GET  /api/data        (Protected)")
+    print("   POST /api/data        (Protected)")
+    print("   POST /api/encrypt     (Protected - NEW)")
+    print("   POST /api/decrypt     (Protected - NEW)")
     print("\n" + "="*60)
     print("Press CTRL+C to stop the server\n")
     
