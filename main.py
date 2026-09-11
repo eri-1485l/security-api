@@ -8,6 +8,7 @@ import uvicorn
 import os
 from dotenv import load_dotenv
 
+# Load environment variables initially
 load_dotenv()
 
 API_KEY = os.getenv("API_KEY")
@@ -32,10 +33,16 @@ app.add_middleware(
 
 crypto_service = CryptoService()
 
+
+# ============================================
+# DATA MODELS
+# ============================================
+
 class DataRequest(BaseModel):
     nombre: Optional[str] = None
     mensaje: Optional[str] = None
     timestamp: Optional[str] = None
+
 
 class DataResponse(BaseModel):
     message: str
@@ -43,24 +50,49 @@ class DataResponse(BaseModel):
     status: str
     data: dict
 
+
 class HealthResponse(BaseModel):
     status: str
     timestamp: str
 
+
+# ============================================
+# AUTHENTICATION
+# ============================================
+
+def get_api_key() -> str:
+    """
+    Reads the API_KEY from the .env file on each request.
+    This allows the key to be rotated without restarting the server.
+    """
+    load_dotenv(override=True)
+    return os.getenv("API_KEY")
+
+
 def verify_api_key(x_api_key: Optional[str] = Header(None)):
+    """
+    Verifies the API Key by reading the current value from the .env file.
+    """
     if x_api_key is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="API Key required. Send 'x-api-key' header"
         )
-    
-    if x_api_key != API_KEY:
+
+    current_api_key = get_api_key()
+
+    if x_api_key != current_api_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid API Key"
         )
-    
+
     return x_api_key
+
+
+# ============================================
+# ENDPOINTS
+# ============================================
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
@@ -69,10 +101,11 @@ async def health_check():
         timestamp=datetime.now().isoformat()
     )
 
+
 @app.get("/api/data", response_model=DataResponse)
 async def get_protected_data(api_key: Optional[str] = Header(None, alias="x-api-key")):
     verify_api_key(api_key)
-    
+
     return DataResponse(
         message="Protected data",
         course="Security Exercise",
@@ -85,18 +118,20 @@ async def get_protected_data(api_key: Optional[str] = Header(None, alias="x-api-
         }
     )
 
+
 @app.post("/api/data")
 async def post_protected_data(
     request_data: Optional[DataRequest] = None,
     api_key: Optional[str] = Header(None, alias="x-api-key")
 ):
     verify_api_key(api_key)
-    
+
     return {
         "message": "POST received",
         "receivedData": request_data.dict() if request_data else {},
         "timestamp": datetime.now().isoformat()
     }
+
 
 @app.post("/api/encrypt")
 async def encrypt_data(
@@ -104,10 +139,10 @@ async def encrypt_data(
     api_key: Optional[str] = Header(None, alias="x-api-key")
 ):
     verify_api_key(api_key)
-    
+
     if not request_data.mensaje:
         raise HTTPException(status_code=400, detail="The 'mensaje' field is required")
-    
+
     try:
         encrypted = crypto_service.encrypt(request_data.mensaje)
         return {
@@ -118,16 +153,17 @@ async def encrypt_data(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Encryption error: {str(e)}")
 
+
 @app.post("/api/decrypt")
 async def decrypt_data(
     request_data: DataRequest,
     api_key: Optional[str] = Header(None, alias="x-api-key")
 ):
     verify_api_key(api_key)
-    
+
     if not request_data.mensaje:
         raise HTTPException(status_code=400, detail="The 'mensaje' field is required")
-    
+
     try:
         decrypted = crypto_service.decrypt(request_data.mensaje)
         return {
@@ -137,6 +173,11 @@ async def decrypt_data(
         }
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Decryption error: {str(e)}")
+
+
+# ============================================
+# ERROR HANDLING
+# ============================================
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):
@@ -153,6 +194,11 @@ async def http_exception_handler(request, exc):
         status_code=exc.status_code,
         content={"error": exc.detail}
     )
+
+
+# ============================================
+# SERVER STARTUP
+# ============================================
 
 if __name__ == "__main__":
     print("\n" + "="*60)
@@ -171,5 +217,5 @@ if __name__ == "__main__":
     print("   POST /api/decrypt     (Protected - NEW)")
     print("\n" + "="*60)
     print("Press CTRL+C to stop the server\n")
-    
+
     uvicorn.run(app, host="0.0.0.0", port=8000)
