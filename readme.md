@@ -1,14 +1,17 @@
 # Security API - Backend
 
-REST API with API Key authentication and AES-GCM encryption/decryption (Security Anti-Pattern Demonstration).
+REST API with API Key authentication, AES-GCM encryption/decryption, and LDAP authentication (Security Anti-Pattern Demonstration).
 
-Protected endpoints require the `x-api-key` header. Encryption uses a 256-bit key loaded from the environment (`DATABASE_ENCRYPTION_KEY`). Secrets are no longer hardcoded in `main.py`; they are loaded from a `.env` file with `python-dotenv`.
+Protected endpoints require the `x-api-key` header. Encryption uses a 256-bit key loaded from the environment (`DATABASE_ENCRYPTION_KEY`). User login is validated against LDAP via `POST /login`. Secrets are loaded from a `.env` file with `python-dotenv`.
 
-## Requirements
+The backend reads `API_KEY` from `.env` on **each request**, so the server does not need to be restarted when the key is rotated.
+
+## Prerequisites
 
 - Python 3.8+
 - pip
-- Docker (needed if you run the frontend container or `rotate_secret.py`)
+- Docker (needed to run OpenLDAP and the frontend container)
+- An LDAP server available at `ldap://localhost:389` (for example the OpenLDAP container from the LDAP lab)
 - Windows 10/11, Mac, or Linux
 
 ## Installation
@@ -38,7 +41,7 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-This installs FastAPI, Uvicorn, `python-dotenv`, `cryptography`, and related packages.
+This installs FastAPI, Uvicorn, `python-dotenv`, `cryptography`, `python-ldap`, and related packages.
 
 ### 4. Configure environment variables
 
@@ -60,18 +63,26 @@ ReDoc: http://localhost:8000/redoc
 
 ## Environment variables
 
-The application loads variables from `.env` using `python-dotenv`. `API_KEY` and `DATABASE_ENCRYPTION_KEY` are both required.
+The application loads variables from `.env` using `python-dotenv`. `API_KEY` and `DATABASE_ENCRYPTION_KEY` are both required. LDAP settings are used by `LDAPService`.
 
 | Variable | Purpose | Rotates? |
 | -------- | ------- | -------- |
-| `API_KEY` | Authentication for protected endpoints (`x-api-key` header) | Yes — every 2 minutes via `rotate_secret.py` |
+| `API_KEY` | Authentication for protected endpoints (`x-api-key` header) | Yes — every 2 minutes via `rotate-secrets` |
 | `DATABASE_ENCRYPTION_KEY` | 32-byte AES-GCM key (Base64) used by `CryptoService` | **No** — must stay stable so ciphertext remains readable |
+| `LDAP_SERVER` | LDAP URL used by `LDAPService` | No |
+| `LDAP_BASE_DN` | Base DN for user lookups | No |
+| `LDAP_ADMIN_DN` | LDAP admin bind DN | No |
+| `LDAP_ADMIN_PASSWORD` | LDAP admin password | Yes — every 2 minutes via `rotate-secrets` |
 
 Example `.env`:
 
 ```bash
 API_KEY=replace-with-a-lab-only-key
 DATABASE_ENCRYPTION_KEY=replace-with-a-32-byte-base64-key
+LDAP_SERVER=ldap://localhost:389
+LDAP_BASE_DN=dc=example,dc=com
+LDAP_ADMIN_DN=cn=admin,dc=example,dc=com
+LDAP_ADMIN_PASSWORD=adminpassword
 ```
 
 ### Generate a valid `DATABASE_ENCRYPTION_KEY`
@@ -86,12 +97,47 @@ Paste the output into `.env` as `DATABASE_ENCRYPTION_KEY`.
 
 ## File structure (relevant)
 
-- `main.py` — FastAPI app, auth, encrypt/decrypt routes
+- `main.py` — FastAPI app, auth, LDAP login, encrypt/decrypt routes
 - `services/crypto_service.py` — `CryptoService` with `encrypt()` and `decrypt()` (AES-GCM, 256-bit)
-- `.env` — `API_KEY` and `DATABASE_ENCRYPTION_KEY`
-- `rotate_secret.py` — rotates `API_KEY` and updates the frontend container
+- `services/ldap_service.py` — `LDAPService` with `authenticate()` and `get_user_dn()`
+- `.env` — `API_KEY`, `DATABASE_ENCRYPTION_KEY`, and LDAP settings
 
-## Testing
+Secret rotation lives in a separate repository (`rotate-secrets`). It updates `.env` and recreates the frontend container. The API does not need a restart after `API_KEY` rotation because the key is re-read from `.env` on every request.
+
+## Endpoints
+
+| Method | Path | Auth | Description |
+| ------ | ---- | ---- | ----------- |
+| `GET` | `/health` | Public | Health check |
+| `POST` | `/login` | LDAP credentials | Authenticate a user against LDAP |
+| `GET` | `/api/data` | `x-api-key` | Protected data |
+| `POST` | `/api/data` | `x-api-key` | Protected POST |
+| `POST` | `/api/encrypt` | `x-api-key` | Encrypt a message (AES-GCM) |
+| `POST` | `/api/decrypt` | `x-api-key` | Decrypt a message (AES-GCM) |
+
+## Testing LDAP login
+
+OpenLDAP must be running. Lab users such as `alice` / `alice123` come from the LDAP exercise.
+
+```bash
+curl -X POST http://localhost:8000/login \
+  -H "Content-Type: application/json" \
+  -d "{\"username\":\"alice\",\"password\":\"alice123\"}"
+```
+
+Success response (`200`):
+
+```json
+{
+  "authenticated": true,
+  "username": "alice",
+  "dn": "uid=alice,ou=users,dc=example,dc=com"
+}
+```
+
+Invalid credentials return `401`.
+
+## Testing protected endpoints
 
 Replace `YOUR_API_KEY` with the current value of `API_KEY` from `.env`.
 
@@ -170,52 +216,14 @@ Response:
 
 ## Secret rotation
 
-`rotate_secret.py` rotates **only** `API_KEY`. It does **not** rotate `DATABASE_ENCRYPTION_KEY`, so existing encrypted data stays decryptable.
+`API_KEY` and `LDAP_ADMIN_PASSWORD` are rotated by the separate `rotate-secrets` project (`rotate_secrets.py`). That script does **not** rotate `DATABASE_ENCRYPTION_KEY`, so existing encrypted data stays decryptable.
 
-From the `security-api` folder (with the virtual environment activated and Docker available for the frontend):
-
-```bash
-python rotate_secret.py
-```
-
-What it does:
-
-1. Waits 2 minutes, then generates a new `API_KEY` (or rotate immediately with **Ctrl+C** during the first wait)
-2. Writes the new key into `.env`
-3. Restarts the `security-frontend` container with the new `API_KEY` so Nginx injects the updated header
-4. Leaves `DATABASE_ENCRYPTION_KEY` unchanged
-5. Continues rotating `API_KEY` every 2 minutes until you stop the script
-
-After a rotation, restart the API (`python main.py`) so it reloads `API_KEY` from `.env`.
-
-### Validate the rotation
-
-Windows:
-
-```bash
-type .env | findstr API_KEY
-```
-
-Linux / Mac:
-
-```bash
-cat .env | grep API_KEY
-```
-
-Confirm `DATABASE_ENCRYPTION_KEY` is unchanged:
-
-```bash
-# Windows
-type .env | findstr DATABASE_ENCRYPTION_KEY
-
-# Linux / Mac
-cat .env | grep DATABASE_ENCRYPTION_KEY
-```
+Because `get_api_key()` reloads `.env` on each request, you do **not** need to restart `python main.py` after an `API_KEY` rotation. The frontend container is recreated by the rotation script so Nginx injects the updated header.
 
 ## Security notes
 
 - Never commit real secrets to the repository. Keep `.env` out of Git.
-- Use lab-only values for `API_KEY` and `DATABASE_ENCRYPTION_KEY`.
+- Use lab-only values for `API_KEY`, `DATABASE_ENCRYPTION_KEY`, and LDAP credentials.
 - Do not rotate `DATABASE_ENCRYPTION_KEY` without a migration that re-encrypts stored data. Changing it makes existing ciphertext unreadable.
 
 ## Technologies Used
@@ -224,4 +232,5 @@ cat .env | grep DATABASE_ENCRYPTION_KEY
 - Uvicorn: ASGI server
 - python-dotenv: Load secrets from `.env`
 - cryptography: AES-GCM encryption
+- python-ldap: LDAP bind and authentication
 - Python 3.11.9: Programming language
