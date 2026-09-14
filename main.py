@@ -16,10 +16,11 @@ if not API_KEY:
     raise ValueError("API_KEY environment variable is required")
 
 from services.crypto_service import CryptoService
+from services.ldap_service import LDAPService
 
 app = FastAPI(
     title="Security API",
-    description="Demo API with API Key authentication and encryption",
+    description="Demo API with API Key authentication, encryption, and LDAP login",
     version="1.0.0"
 )
 
@@ -32,6 +33,7 @@ app.add_middleware(
 )
 
 crypto_service = CryptoService()
+ldap_service = LDAPService()
 
 
 # ============================================
@@ -54,6 +56,17 @@ class DataResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     timestamp: str
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+
+class LoginResponse(BaseModel):
+    authenticated: bool
+    username: str
+    dn: str
 
 
 # ============================================
@@ -100,6 +113,24 @@ async def health_check():
         status="ok",
         timestamp=datetime.now().isoformat()
     )
+
+
+@app.post("/login", response_model=LoginResponse)
+async def login(request: LoginRequest):
+    """
+    Authenticate a user against LDAP.
+    """
+    if ldap_service.authenticate(request.username, request.password):
+        return LoginResponse(
+            authenticated=True,
+            username=request.username,
+            dn=ldap_service.get_user_dn(request.username)
+        )
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid username or password"
+        )
 
 
 @app.get("/api/data", response_model=DataResponse)
@@ -208,13 +239,15 @@ if __name__ == "__main__":
     print(f"Documentation: http://localhost:8000/docs")
     print(f"API Key: {API_KEY}")
     print(f"Encryption Key: {os.getenv('DATABASE_ENCRYPTION_KEY', 'NOT SET')[:10]}...")
+    print(f"LDAP Server: {os.getenv('LDAP_SERVER', 'NOT SET')}")
     print("="*60)
     print("\nAvailable endpoints:")
     print("   GET  /health          (Public)")
+    print("   POST /login           (LDAP Authentication - NEW)")
     print("   GET  /api/data        (Protected)")
     print("   POST /api/data        (Protected)")
-    print("   POST /api/encrypt     (Protected - NEW)")
-    print("   POST /api/decrypt     (Protected - NEW)")
+    print("   POST /api/encrypt     (Protected)")
+    print("   POST /api/decrypt     (Protected)")
     print("\n" + "="*60)
     print("Press CTRL+C to stop the server\n")
 
